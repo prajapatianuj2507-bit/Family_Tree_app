@@ -1,0 +1,88 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper function: Checks if the user is authenticated
+    function isAuth() {
+      return request.auth != null;
+    }
+    
+    // Helper function: Checks if the user's UID is in the masters collection
+    function isMaster(uid) {
+      return isAuth() && exists(/databases/$(database)/documents/masters/$(uid));
+    }
+    
+    // Helper function: Checks if the user is an Admin of the given familyId
+    function isFamilyAdmin(familyId) {
+      return isAuth() &&
+        exists(/databases/$(database)/documents/members/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/members/$(request.auth.uid)).data.role == 'admin' &&
+        get(/databases/$(database)/documents/members/$(request.auth.uid)).data.familyId == familyId;
+    }
+    
+    // Helper function: Checks if user's synthetic email matches the member's mobile number
+    function isMigrationOwner(mobileNumber) {
+      return isAuth() && 
+        ('email' in request.auth.token) &&
+        request.auth.token.email == mobileNumber + '@familytree.internal';
+    }
+
+    // Rule for Masters Collection
+    match /masters/{masterId} {
+      allow create: if isAuth() && request.auth.uid == masterId;
+      allow read:   if isAuth() && request.auth.uid == masterId;
+      allow update, delete: if false;
+    }
+    
+    // Rule for Families Collection
+    match /families/{familyId} {
+      allow read: if isAuth();
+      allow create: if isMaster(request.auth.uid) &&
+                       request.resource.data.masterId == request.auth.uid;
+      // Admins and Masters can update family documents (required to sync 'memberCount' when adding/deleting members).
+      allow update: if isMaster(request.auth.uid) || isFamilyAdmin(familyId);
+      allow delete: if isMaster(request.auth.uid) &&
+                       resource.data.masterId == request.auth.uid;
+    }
+    
+    // Rule for Members Collection
+    match /members/{memberId} {
+      allow read: if isAuth();
+      
+      // Allow create if:
+      // 1. Operator is Master
+      // 2. Operator is Family Admin of target family
+      // 3. User is migrating their own document to auth.uid (role must stay 'member')
+      allow create: if isMaster(request.auth.uid)
+        || (isAuth() && request.resource.data.familyId != null && isFamilyAdmin(request.resource.data.familyId))
+        || (isAuth() && request.auth.uid == memberId
+            && request.resource.data.role == 'member');
+
+      // Allow update if:
+      // 1. Operator is Master — full access
+      // 2. Operator is Family Admin of member's family — full access to that family's members
+      // 3. User is editing their OWN profile — but CANNOT change role or familyId (prevents escalation)
+      allow update: if isMaster(request.auth.uid)
+        || (isAuth() && resource.data.familyId != null && isFamilyAdmin(resource.data.familyId))
+        || (isAuth() && request.auth.uid == memberId
+            && request.resource.data.role == resource.data.role
+            && request.resource.data.familyId == resource.data.familyId);
+
+      // Allow delete if:
+      // 1. Operator is Master
+      // 2. Operator is Family Admin of member's family
+      // 3. User is deleting their old random ID document during login migration
+      allow delete: if isMaster(request.auth.uid)
+        || (isAuth() && resource.data.familyId != null && isFamilyAdmin(resource.data.familyId))
+        || (isAuth() && resource.data.mobileNumber != null && isMigrationOwner(resource.data.mobileNumber));
+    }
+    
+    // Rule for Password Reset Requests Collection
+    match /password_reset_requests/{reqId} {
+      allow read:   if isAuth();
+      allow create: if request.resource.data.status == 'pending' && request.resource.data.mobileNumber == reqId;
+      allow update: if isAuth() && isMaster(request.auth.uid);
+      allow delete: if isAuth() && isMaster(request.auth.uid);
+    }
+  }
+}

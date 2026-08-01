@@ -1,0 +1,126 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper Functions ──────────────────────────────────────────
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isMaster() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/masters/$(request.auth.uid));
+    }
+
+    function callerMember() {
+      return get(/databases/$(database)/documents/members/$(request.auth.uid)).data;
+    }
+
+    function isAdminOfFamily(familyId) {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/members/$(request.auth.uid)) &&
+        callerMember().role     == 'admin' &&
+        callerMember().familyId == familyId;
+    }
+
+    function isMemberOfFamily(familyId) {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/members/$(request.auth.uid)) &&
+        callerMember().familyId == familyId;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // ── Masters Collection ────────────────────────────────────────
+
+    match /masters/{uid} {
+      allow read:   if isSignedIn();
+      allow create: if isOwner(uid);
+      allow update: if isOwner(uid);
+      allow delete: if false;
+    }
+
+    // ── Families Collection & Events Subcollection ────────────────
+
+    match /families/{familyId} {
+      allow read:   if isMaster() || isMemberOfFamily(familyId);
+      allow create: if isMaster();
+      allow update: if isMaster() || isAdminOfFamily(familyId);
+      allow delete: if isMaster();
+
+      // Subcollection for family events
+      match /events/{eventId} {
+        allow read: if isMaster() || isMemberOfFamily(familyId);
+        allow create: if isMemberOfFamily(familyId) && request.resource.data.familyId == familyId && request.resource.data.createdBy == request.auth.uid;
+        allow update: if isMaster() || (isMemberOfFamily(familyId) && request.resource.data.familyId == familyId && (isAdminOfFamily(familyId) || resource.data.createdBy == request.auth.uid));
+        allow delete: if isMaster() || (isMemberOfFamily(familyId) && (isAdminOfFamily(familyId) || resource.data.createdBy == request.auth.uid));
+      }
+    }
+
+    // ── Members Collection ────────────────────────────────────────
+
+    match /members/{memberId} {
+      // ✅ Allow unauthenticated reads on members collection.
+      // Required for the login flow: signInMember() must query by
+      // mobileNumber BEFORE Firebase Auth is signed in.
+      allow read: if true;
+
+      // Allow create if:
+      // 1. Operator is Master
+      // 2. Operator is Family Admin of target family
+      // 3. User is migrating their own document to auth.uid (role must stay 'member' or 'admin')
+      allow create: if isMaster() 
+        || isAdminOfFamily(request.resource.data.familyId)
+        || (isSignedIn() && request.auth.uid == memberId
+            && (request.resource.data.role == 'member' || request.resource.data.role == 'admin'));
+
+      allow update: if isMaster() 
+        || isAdminOfFamily(resource.data.familyId) 
+        || isOwner(memberId);
+
+      allow delete: if isMaster() 
+        || isAdminOfFamily(resource.data.familyId);
+    }
+
+    // ── Reset Requests Collections ────────────────────────────────
+
+    match /resetRequests/{requestId} {
+      allow read:   if isMaster() || !isSignedIn(); 
+      allow create: if true;
+      allow update: if isMaster();
+      allow delete: if false;
+    }
+
+    match /password_reset_requests/{requestId} {
+      allow read:   if isMaster() || !isSignedIn();
+      allow create: if true;
+      allow update: if isMaster();
+      allow delete: if isMaster();
+    }
+
+    // ── Notifications Collection ──────────────────────────────────
+
+    match /notifications/{notificationId} {
+      allow read: if isMaster() || (isSignedIn() && (resource.data.familyId == callerMember().familyId || resource.data.recipientId == request.auth.uid));
+      allow create: if isSignedIn();
+      allow update: if isMaster() || (isSignedIn() && (resource.data.familyId == callerMember().familyId || resource.data.recipientId == request.auth.uid));
+      allow delete: if isMaster() || (isSignedIn() && resource.data.recipientId == request.auth.uid);
+    }
+
+    // ── Collection Group Rule for Events ──────────────────────────
+
+    match /{path=**}/events/{eventId} {
+      allow read: if isMaster() || isMemberOfFamily(resource.data.familyId);
+    }
+
+    // ── FCM Tokens Collection ─────────────────────────────────────
+
+    match /fcm_tokens/{tokenId} {
+      allow create, update: if isSignedIn() && request.resource.data.memberId == request.auth.uid;
+      allow read, delete: if isSignedIn() && resource.data.memberId == request.auth.uid;
+    }
+  }
+}
