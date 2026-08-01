@@ -523,7 +523,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
       ),
       builder: (context) {
         return _NativePlaceSearchBottomSheet(
-          apiKey: "AIzaSyABNOR5Y5RBkep9P-1xh0U245dHMMdKl1g",
+          apiKey: const String.fromEnvironment('MAPS_API_KEY'),
           onSelect: (val) {
             setState(() {
               _nativePlaceCtrl.text = val;
